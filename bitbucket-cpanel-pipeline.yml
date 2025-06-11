@@ -63,7 +63,7 @@ definitions:
             ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -o BatchMode=yes -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST"
             "bash -lc 'cd /home/bloggohrt/dev.blog.gohrt.com && if [ ! -d .git ]; then git clone git@bitbucket.org:dswd/blog.git .; else git -C . fetch origin; fi'"
           - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && sudo -u bloggohrt git reset --hard origin/${BITBUCKET_BRANCH}"
-          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && echo \"$GCP_SA_KEY\" > config/wp-stateless-service-account.json"
+          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && mkdir -p config  && echo \"$GCP_SA_KEY\" > config/wp-stateless-service-account.json"
           - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && chmod 600 config/wp-stateless-service-account.json"
           - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && composer install --no-interaction --prefer-dist"
           - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && chmod +x scripts/apply-config.sh"
