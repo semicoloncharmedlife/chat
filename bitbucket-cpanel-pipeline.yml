@@ -1,0 +1,158 @@
+definitions:
+  caches:
+    composer: ~/.composer/cache
+
+  steps:
+    - step: &build-test
+        name: Install, Auto-fix, Lint & Test
+        image: composer:2
+        caches:
+          - composer
+        script:
+          - composer install --no-interaction --prefer-dist
+          - vendor/bin/phpcs -s --extensions=php,inc --standard=WordPress wp-content/themes/ wp-content/plugins/wpcom-tools/
+          - pwd
+          - ls -la
+          - ls -la tests
+          - ls -la tests/unit
+          - vendor/bin/phpunit --configuration ./phpunit.xml --list-tests
+          - mkdir -p test-reports
+          - head -20 tests/unit/SmokeTest.php || true
+          - vendor/bin/phpunit --configuration phpunit.xml --log-junit test-reports/junit.xml
+        artifacts:
+          - test-reports/**
+        reports:
+          junit: test-reports/junit.xml
+
+    - step: &deploy-dev
+        name: Deploy to DEV
+        deployment: develop
+        script:
+          # Step 1: Setup SSH key & known_hosts
+          - mkdir -p ~/.ssh
+          - echo "$DEV_SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/id_rsa
+          - chmod 600 ~/.ssh/id_rsa
+          - ssh-keyscan -p 522 -H "$DEV_HOST" >> ~/.ssh/known_hosts
+          - ssh-keyscan -p 522 -H "$PROD_HOST" >> ~/.ssh/known_hosts
+
+          # Step 3: Export prod DB to file (locally in pipeline container)
+          - ssh -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$PROD_HOST" "mysqldump -u $PROD_DB_USER -p'$PROD_DB_PASS' '$PROD_DB_NAME' --add-drop-table" > prod-db.sql
+          - test -s prod-db.sql  # Fail if file is empty or missing
+
+          # Step 4: Copy prod-db.sql to DEV host
+          - scp -P 522 -i ~/.ssh/id_rsa prod-db.sql "$SSH_USER@$DEV_HOST:~/prod-db.sql"
+
+          # Step 5: Import DB on DEV host
+          - ssh -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "mysql -u $DEV_DB_USER -p'$DEV_DB_PASS' '$DEV_DB_NAME' < ~/prod-db.sql"
+
+          # Step 5b: SQL-based search-replace (no wp-cli)
+          - ssh -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "mysql -u $DEV_DB_USER -p'$DEV_DB_PASS' $DEV_DB_NAME -e \"
+            UPDATE blogohrt_wp_options SET option_value = REPLACE(option_value, 'https://blog.gohrt.com', 'https://dev.blog.gohrt.com') WHERE option_name IN ('siteurl', 'home');
+            UPDATE blogohrt_wp_posts SET post_content = REPLACE(post_content, 'https://blog.gohrt.com', 'https://dev.blog.gohrt.com');
+            UPDATE blogohrt_wp_postmeta SET meta_value = REPLACE(meta_value, 'https://blog.gohrt.com', 'https://dev.blog.gohrt.com');
+            UPDATE blogohrt_wp_usermeta SET meta_value = REPLACE(meta_value, 'https://blog.gohrt.com', 'https://dev.blog.gohrt.com');
+            UPDATE blogohrt_wp_comments SET comment_content = REPLACE(comment_content, 'https://blog.gohrt.com', 'https://dev.blog.gohrt.com');
+            UPDATE blogohrt_wp_links SET link_url = REPLACE(link_url, 'https://blog.gohrt.com', 'https://dev.blog.gohrt.com');\""
+
+          # Step 6: Cleanup local prod-db.sql file
+          - rm prod-db.sql
+
+          # Step 7: Git pull deploy on DEV host (split commands for visibility)
+          - echo "Deploying to dev..."
+          - >-
+            ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -o BatchMode=yes -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST"
+            "bash -lc 'cd /home/bloggohrt/dev.blog.gohrt.com && if [ ! -d .git ]; then git clone git@bitbucket.org:dswd/blog.git .; else git -C . fetch origin; fi'"
+          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && sudo -u bloggohrt git reset --hard origin/${BITBUCKET_BRANCH}"
+          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && echo \"$GCP_SA_KEY\" > config/wp-stateless-service-account.json"
+          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && chmod 600 config/wp-stateless-service-account.json"
+          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && composer install --no-interaction --prefer-dist"
+          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && chmod +x scripts/apply-config.sh"
+          - ssh -o CheckHostIP=no -o StrictHostKeyChecking=no -p 522 -i ~/.ssh/id_rsa "$SSH_USER@$DEV_HOST" "cd /home/bloggohrt/dev.blog.gohrt.com && ./scripts/apply-config.sh"
+
+          - echo "Deployed successfully!"
+
+    - step: &deploy-uat
+        name: Deploy to UAT
+        trigger: manual
+        deployment: uat
+        script:
+          - mkdir -p ~/.ssh
+          - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          - chmod 600 ~/.ssh/id_rsa
+          - ssh-keyscan -H $UAT_HOST >> ~/.ssh/known_hosts
+          # Sync Prod DB into UAT
+          - |
+            ssh -i ~/.ssh/id_rsa $SSH_USER@$PROD_HOST "wp db export - --add-drop-table" \
+              | ssh -i ~/.ssh/id_rsa $SSH_USER@$UAT_HOST "wp db import - && \
+                wp search-replace 'https://blog.gohrt.com' 'https://uat.blog.gohrt.com' --skip-columns=guid"
+          # Git-pull deploy on UAT
+          - |
+            ssh -i ~/.ssh/id_rsa $SSH_USER@$UAT_HOST << 'EOF'
+              set -e
+              cd /var/www/uat.blog.gohrt.com
+              if [ ! -d .git ]; then
+                git clone git@bitbucket.org:dswd/blog.git .
+              else
+                git fetch origin
+              fi
+              git reset --hard origin/${BITBUCKET_TAG}
+              echo "$GCP_SA_KEY" > config/wp-stateless-service-account.json
+              chmod 600 config/wp-stateless-service-account.json
+              composer install --no-interaction --prefer-dist
+              chmod +x scripts/apply-config.sh
+              ./scripts/apply-config.sh
+            EOF
+
+    - step: &deploy-prod
+        name: Deploy to PROD
+        trigger: manual
+        deployment: production
+        script:
+          - mkdir -p ~/.ssh
+          - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          - chmod 600 ~/.ssh/id_rsa
+          - ssh-keyscan -H $PROD_HOST >> ~/.ssh/known_hosts
+          # Git-pull deploy on PROD
+          - |
+            ssh -i ~/.ssh/id_rsa $SSH_USER@$PROD_HOST << 'EOF'
+              set -e
+              cd /home/bloggohrt/www
+              if [ ! -d .git ]; then
+                git clone git@bitbucket.org:dswd/blog.git .
+              else
+                git fetch origin
+              fi
+              git reset --hard origin/${BITBUCKET_TAG}
+              echo "$GCP_SA_KEY" > config/wp-stateless-service-account.json
+              chmod 600 config/wp-stateless-service-account.json
+              composer install --no-interaction --prefer-dist
+              chmod +x scripts/apply-config.sh
+              ./scripts/apply-config.sh
+            EOF
+
+pipelines:
+  pull-requests:
+    "**":
+      - step: *build-test
+
+  branches:
+    develop:
+      - step: *build-test
+      - step: *deploy-dev
+
+    feature/*:
+      - step: *build-test
+      - step: *deploy-dev
+
+    bugfix/*:
+      - step: *build-test
+      - step: *deploy-dev
+
+  tags:
+    "rc-*":
+      - step: *build-test
+      - step: *deploy-uat
+
+    "v*.*.*":
+      - step: *build-test
+      - step: *deploy-prod
